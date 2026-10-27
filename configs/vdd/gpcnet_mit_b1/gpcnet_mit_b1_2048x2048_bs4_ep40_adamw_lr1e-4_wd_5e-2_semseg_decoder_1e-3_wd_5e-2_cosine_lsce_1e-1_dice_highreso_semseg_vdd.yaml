@@ -1,0 +1,326 @@
+globals:  # global settings
+  output_root: ./output  # The path for saving checkpoints, wandb, logs, results
+  log_level: info  # The log level for logger, options are `debug`, `info`, `warning`, `error`, and `critical`
+  enable_amp: True  # Enable automatic mixed precision
+  find_unused_parameters: False  # Whether to find unused parameters in DistributedDataParallel
+model:  # model settings
+  cls: GPCNetMitB1  # The class name of the model, which needs to be included in the `models` package
+  kwargs:  # The parameters of the model class
+    num_classes: 7
+    image_size: 
+      - 2048
+      - 2048
+    num_grids:
+      - 4
+      - 4
+    enable_intx:
+      - True
+      - True
+      - True
+      - True
+    dec_chans: 64
+    kernel_size: 3
+    groups: 4
+    aux_heads: True
+  input_keys:  # The keys of the tensor inputs
+    - image
+  output_keys:  # The keys of the tensor outputs
+    - logit
+    - aux_logit_x2
+    - aux_logit_x4
+dataset:  # dataset settings
+  cls: VDD  # The class name of the dataset, which needs to be included in the `datasets` package
+  root_path: ~/datasets/VDD/VDD  # The root path of the dataset
+  ignore_class: 255  # The ignored class, class name (str) or class index (int) are supported
+  num_workers: 4  # How many subprocesses to use for data loading
+prune:
+  reload_pth: last_epoch.pth  # The pth file name that required to be loaded for pruning resuming
+  save_full_model: True  # Whether to save the full model after pruning
+  prune_iters: 10  # The total number of pruning iterations
+  sample_size: 8  # The number of samples used to calculate importance scores
+  batch_size: 1  # The batch size for each accumulation step
+  target_sparsity: 0.4  # Target sparsity for pruning
+  forward_fn:  # The model forward function to calculate importance 
+  pruner:  # pruner settings
+    target_module: encoder # Target module for pruning
+    ignored_layers:  # Ignore layers for pruning
+      - semantic_decoder
+    example_input_size:
+      - 1024
+      - 1024
+    kwargs:
+      global_pruning: True
+      round_to: 8
+  importance:  # importance criteria settings
+    type: ntk
+    kwargs:   
+      group_reduction: mean
+      normalizer: 
+      accu_ntk_steps: 1
+  dataset:  # The settings to determine how to load training dataset
+    kwargs:  # The parameters of the training dataset class
+      test_mode: False
+      image_dir: train/src
+      image_suffix: .JPG
+      label_dir: train/gt-dec
+      label_suffix: .png
+      crop_grids:
+        - 3
+        - 5
+      grid_size:
+        - 1024
+        - 1024
+    pipeline:  # DALI pipeline included in the `datasets.dali_pipeline` package
+      func: semseg_validation_pipeline
+      kwargs:
+        random_shuffle: True
+        output_size:
+          - 1024
+          - 1024
+  engine:  # The class name of the pruning engine, which needs to be included in the `engines` package
+    cls: BasicPrune
+train:  # training settings
+  reload_pth: last_epoch.pth  # The pth file name that required to be loaded for training resuming
+  save_full_model: True  # Whether to save the full model during training
+  num_epoch: 40  # The number of training epoch
+  batch_size: 4  # The total number of batch sizes for all GPUs
+  summary_freq: 300  # The frequency for flushing weight&bias summaries
+  optimizer:  # optimizer settings
+    cls: AdamW  # The class name of the optimizer, which needs to be included in the `torch.optim` package
+    kwargs:  # The parameters of the optimizer class
+      lr: 0.0001
+      betas: 
+        - 0.9
+        - 0.999
+      weight_decay: 0.05
+    modules:  # The modules for setting different learning rate and weight decay
+      - semantic_decoder:  # The module name of the model for setting different learning rate and weight decay
+          lr: 0.001  # The learning rate of the module
+          weight_decay: 0.05  # The weight decay of the module
+    # gradient_norm_clipping: 1.0  # Norm clipping the gradients
+  learning_rate:  # learninig rate scheduler settings
+    step_mode: iteration  # The step mode for learning rate scheduler, options are `epoch`, `iteration`
+    warmup_steps: 0  # Number of steps of warmup strategy, Note that when the number of steps is greater than 0, the total number of steps of the post scheduler should be subtracted
+    cls: CosineAnnealingLR  # The class name of the learning rate scheduler, which needs to be included in the `scheduler` package
+    kwargs:  # The parameters of the learning rate scheduler class
+      T_max: 16800  # 40*420
+      eta_min: 0.00001
+  dataset:  # The settings to determine how to load training dataset
+    kwargs:  # The parameters of the training dataset class
+      test_mode: False
+      image_dir: train/src
+      image_suffix: .JPG
+      label_dir: train/gt-dec
+      label_suffix: .png
+      crop_grids:
+        - 2
+        - 3
+      grid_size:
+        - 2048
+        - 2048
+    pipeline:  # DALI pipeline included in the `datasets.dali_pipeline` package
+      func: semseg_training_pipeline
+      kwargs:
+        output_size:
+          - 2048
+          - 2048
+        random_shuffle: True
+        random_scale_prob: 1.0
+        random_scale_limit: 
+          - -0.5
+          - 1.0
+        color_jitter_prob: 1.0
+        color_brightness:
+          - 0.8
+          - 1.2
+        color_contrast: 
+          - 0.8
+          - 1.2
+        color_saturation:
+          - 0.8
+          - 1.2
+        color_hue:
+          - -0.1
+          - 0.1
+        horizontal_flip_prob: 0.5
+  metrics:  # Metric settings for training and validation
+    acc:  # Metric key
+      cls: MulticlassAccuracy  # # The class name of the metric, which needs to be included in the `torchmetrics` package
+      kwargs:  # The parameters of the metric class
+        num_classes: 7
+        ignore_index: 255
+      tensor_keys:  # The tensors keys for metric update, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+    iou: 
+      cls: MulticlassJaccardIndex
+      kwargs: 
+        num_classes: 7
+        ignore_index: 255
+      tensor_keys:  # The tensors keys for metric update, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+    f1: 
+      cls: MulticlassF1Score
+      kwargs: 
+        num_classes: 7
+        ignore_index: 255
+      tensor_keys:  # The tensors keys for metric update, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+  losses:  # Loss settings for training and validation
+    ce2d:  # Loss key
+      weight: 1.0  # The weight of the loss
+      cls: CrossEntropy2D  # The class name of the loss, which needs to be included in the `losses` package 
+      kwargs:  # The parameters of the loss class
+        ignore_index: 255
+        label_smoothing: 0.1
+      forward:  # The tensors keys for loss forward, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+    dice:
+      weight: 1.0  # The weight of the loss
+      cls: DiceLoss2D  # The class name of the loss, which needs to be included in the `losses` package 
+      kwargs:  # The parameters of the loss class
+        ignore_index: 255
+      forward:  # The tensors keys for loss forward, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+    ce2d.1:  # Loss key
+      weight: 0.4  # The weight of the loss
+      cls: CrossEntropy2D  # The class name of the loss, which needs to be included in the `losses` package 
+      kwargs:  # The parameters of the loss class
+        ignore_index: 255
+        label_smoothing: 0.1
+      forward:  # The tensors keys for loss forward, e.g. - input/output: key
+        - outputs: aux_logit_x2
+        - inputs: label_x2
+    dice.1:
+      weight: 0.4  # The weight of the loss
+      cls: DiceLoss2D  # The class name of the loss, which needs to be included in the `losses` package 
+      kwargs:  # The parameters of the loss class
+        ignore_index: 255
+      forward:  # The tensors keys for loss forward, e.g. - input/output: key
+        - outputs: aux_logit_x2
+        - inputs: label_x2
+    ce2d.2:  # Loss key
+      weight: 0.4  # The weight of the loss
+      cls: CrossEntropy2D  # The class name of the loss, which needs to be included in the `losses` package 
+      kwargs:  # The parameters of the loss class
+        ignore_index: 255
+        label_smoothing: 0.1
+      forward:  # The tensors keys for loss forward, e.g. - input/output: key
+        - outputs: aux_logit_x4
+        - inputs: label_x4
+    dice.2:
+      weight: 0.4  # The weight of the loss
+      cls: DiceLoss2D  # The class name of the loss, which needs to be included in the `losses` package 
+      kwargs:  # The parameters of the loss class
+        ignore_index: 255
+      forward:  # The tensors keys for loss forward, e.g. - input/output: key
+        - outputs: aux_logit_x4
+        - inputs: label_x4
+  engine:  # The class name of the running engine, which needs to be included in the `engines` package 
+    cls: HighResoSemSegTrain
+valid:  # validation settings
+  reload_pth: last_epoch.pth  # The pth file name that required to be loaded for valiation
+  batch_size: 4  # The total number of batch sizes for all GPUs
+  summary_freq: 300  # The frequency for flushing weight&bias summaries
+  dataset:  # The settings to determine how to load training dataset
+    kwargs:  # The parameters of the validation dataset class
+      test_mode: False
+      image_dir: val/src
+      image_suffix: .JPG
+      label_dir: val/gt-dec
+      label_suffix: .png
+      crop_grids:
+        - 1
+        - 2
+      grid_size:
+    pipeline:  # DALI pipeline included in the `datasets.dali_pipeline` package
+      func: semseg_validation_pipeline
+      kwargs:
+        output_size:
+          - 2048
+          - 2048
+  metrics:  # Metric settings for training and validation
+    acc:  # Metric key
+      cls: MulticlassAccuracy  # # The class name of the metric, which needs to be included in the `torchmetrics` package
+      kwargs:  # The parameters of the metric class
+        num_classes: 7
+        ignore_index: 255
+        average: none
+      tensor_keys:  # The tensors keys for metric update, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+    iou: 
+      cls: MulticlassJaccardIndex
+      kwargs: 
+        num_classes: 7
+        ignore_index: 255
+        average: none
+      tensor_keys:  # The tensors keys for metric update, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+    f1: 
+      cls: MulticlassF1Score
+      kwargs: 
+        num_classes: 7
+        ignore_index: 255
+        average: none
+      tensor_keys:  # The tensors keys for metric update, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+  engine:  # The class name of the running engine, which needs to be included in the `engines` package 
+    cls: HighResoSemSegValid
+test:  # testing settings
+  reload_pth: last_epoch.pth  # The pth file name that required to be loaded for valiation
+  batch_size: 4  # The total number of batch sizes for all GPUs
+  summary_freq: 300  # The frequency for flushing weight&bias summaries
+  dataset:  # The settings to determine how to load training dataset
+    kwargs:  # The parameters of the validation dataset class
+      test_mode: False
+      image_dir: test/src
+      image_suffix: .JPG
+      label_dir: test/gt-dec
+      label_suffix: .png
+      crop_grids:
+        - 1
+        - 2
+      grid_size:
+    pipeline:  # DALI pipeline included in the `datasets.dali_pipeline` package
+      func: semseg_validation_pipeline
+      kwargs:
+        output_size:
+          - 2048
+          - 2048
+  metrics:  # Metric settings for training and validation
+    acc:  # Metric key
+      cls: MulticlassAccuracy  # # The class name of the metric, which needs to be included in the `torchmetrics` package
+      kwargs:  # The parameters of the metric class
+        num_classes: 7
+        ignore_index: 255
+        average: none
+      tensor_keys:  # The tensors keys for metric update, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+    iou: 
+      cls: MulticlassJaccardIndex
+      kwargs: 
+        num_classes: 7
+        ignore_index: 255
+        average: none
+      tensor_keys:  # The tensors keys for metric update, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+    f1: 
+      cls: MulticlassF1Score
+      kwargs: 
+        num_classes: 7
+        ignore_index: 255
+        average: none
+      tensor_keys:  # The tensors keys for metric update, e.g. - input/output: key
+        - outputs: logit
+        - inputs: label
+  engine:  # The class name of the running engine, which needs to be included in the `engines` package 
+    cls: HighResoSemSegValid

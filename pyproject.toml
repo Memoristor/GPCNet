@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 120
+exclude = ["backup/temps", "backup/notebook"]
+
+[tool.ruff.lint]
+ignore = ["F403"]
+
+# [tool.ruff.format]
+# quote-style = "single"
+# indent-style = "tab"
+# docstring-code-format = true
