@@ -2,7 +2,7 @@
 
 Official implementation of **"GPCNet: Grid-Parallel Compact Network With Kernel-Adaptive Feature Fusion for Semantic Segmentation of High-Resolution UAV Imagery"**, published in **IEEE Transactions on Geoscience and Remote Sensing (TGRS), 2026**.
 
-[Paper](https://doi.org/10.1109/TGRS.2026.3725031) · [Environment Setup](ENVIRONMENTS.md) · [Configurations](configs) · [Citation](#-citation)
+[Paper](https://doi.org/10.1109/TGRS.2026.3725031) · [Environment Setup](assets/ENVIRONMENTS.md) · [Datasets and Configurations](assets/DATASETS_AND_CONFIGS.md) · [Citation](#-citation)
 
 ## 📋 Abstract
 
@@ -27,8 +27,6 @@ The paper evaluates four variants:
 | GPCNet-S  | MiT-B1  | 0%               | Train → Test          |
 | GPCNet-SP | MiT-B1  | 40%              | Prune → Train → Test |
 
-The dense and compact variants share the same model class; the compact encoder is constructed by the pruning phase.
-
 ## 💻 Usage
 
 ### Installation
@@ -38,82 +36,21 @@ git clone https://github.com/Memoristor/GPCNet.git
 cd GPCNet
 ```
 
-Follow [ENVIRONMENTS.md](ENVIRONMENTS.md) to prepare the Python, PyTorch, CUDA, and NVIDIA DALI environment. Then build the local spatial variable convolution (SVC) extension in the same environment:
+Follow [ENVIRONMENTS.md](assets/ENVIRONMENTS.md) to set up the environment, then build the spatial variable convolution (SVC) extension:
 
 ```bash
 python -m pip install --no-build-isolation -e ./kernels/spatial_variable_convolution
-python -c "from svc import spatial_variable_convolution; print('SVC extension imported successfully')"
+python - <<'PY'
+from svc import spatial_variable_convolution
+print('SVC extension imported successfully')
+PY
 ```
 
-The SVC operator requires an NVIDIA GPU and a CUDA toolkit with `nvcc` available for compilation. MiT encoders load ImageNet-pretrained weights through `segmentation_models_pytorch`; the weights must be downloaded or available in the local cache.
+SVC requires an NVIDIA GPU and the CUDA toolkit with `nvcc`.
 
-### Dataset Preparation
+### Datasets and Configurations
 
-Download the datasets from their official project pages linked below, then set `dataset.root_path` in the selected YAML configuration to your dataset location. The supplied configurations use the following directories relative to that root:
-
-| Dataset                                                        | Classes | Training images / labels                    | Validation images / labels              | Test images / labels                      |
-| -------------------------------------------------------------- | ------- | ------------------------------------------- | --------------------------------------- | ----------------------------------------- |
-| [UAVid](https://uavid.nl/)                                      | 8       | `uavid_train/seq*/Images` / `Labels`    | `uavid_val/seq*/Images` / `Labels`  | `test_gt/seq*/Images` / `Labels`      |
-| [VDD](https://github.com/RussRobin/VDD)                         | 7       | `train/src` / `train/gt-dec`            | `val/src` / `val/gt-dec`            | `test/src` / `test/gt-dec`            |
-| [FloodNet](https://github.com/BinaLab/FloodNet-Supervised_v1.0) | 10      | `train/org-img` / `train/label-img-dec` | `val/org-img` / `val/label-img-dec` | `test/org-img` / `test/label-img-dec` |
-
-<details>
-<summary>Expected directory layouts</summary>
-
-```text
-UAVid/                         # dataset.root_path
-├── uavid_train/
-│   └── seq*/
-│       ├── Images/*.png
-│       └── Labels/*.png
-├── uavid_val/
-│   └── seq*/
-│       ├── Images/*.png
-│       └── Labels/*.png
-└── test_gt/
-    └── seq*/
-        ├── Images/*.png
-        └── Labels/*.png
-
-VDD/                           # dataset.root_path
-├── train/
-├── val/
-└── test/
-    ├── src/*.JPG              # same layout in each split
-    └── gt-dec/*.png
-
-FloodNet/                      # dataset.root_path
-├── train/
-├── val/
-└── test/
-    ├── org-img/*.jpg          # same layout in each split
-    └── label-img-dec/*.png
-```
-
-</details>
-
-Labels must be **RGB color masks** matching the `PALETTE` in [datasets/uavid.py](datasets/uavid.py), [datasets/vdd.py](datasets/vdd.py), or [datasets/floodnet.py](datasets/floodnet.py). Convert class-index masks to these colors before using the DALI pipelines. Image and label files must correspond in sorted order. The UAVid `test_gt` directory is the layout expected by the local evaluation configuration and requires ground-truth labels; an images-only test release cannot be evaluated with this configuration.
-
-Cropping is performed by the data pipeline. Training uses six overlapping `2048 × 2048` patches per image. Evaluation splits each image into two tiles along its width, resizes each tile to `2048 × 2048`, and stitches the resized-back predictions for evaluation at the original resolution.
-
-### Configurations
-
-Each configuration contains the `prune`, `train`, `valid`, and `test` phases:
-
-| Dataset  | MiT-B1: GPCNet-S / GPCNet-SP                                                                                                                                                  | MiT-B2: GPCNet / GPCNet-P                                                                                                                                                     | Training epochs |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| UAVid    | [Config](configs/uavid/gpcnet_mit_b1/gpcnet_mit_b1_2048x2048_bs4_ep40_adamw_lr1e-4_wd_5e-2_semseg_decoder_1e-3_wd_5e-2_cosine_lsce_1e-1_dice_highreso_semseg_uavid.yaml)       | [Config](configs/uavid/gpcnet_mit_b2/gpcnet_mit_b2_2048x2048_bs4_ep40_adamw_lr1e-4_wd_5e-2_semseg_decoder_1e-3_wd_5e-2_cosine_lsce_1e-1_dice_highreso_semseg_uavid.yaml)       | 40              |
-| VDD      | [Config](configs/vdd/gpcnet_mit_b1/gpcnet_mit_b1_2048x2048_bs4_ep40_adamw_lr1e-4_wd_5e-2_semseg_decoder_1e-3_wd_5e-2_cosine_lsce_1e-1_dice_highreso_semseg_vdd.yaml)           | [Config](configs/vdd/gpcnet_mit_b2/gpcnet_mit_b2_2048x2048_bs4_ep40_adamw_lr1e-4_wd_5e-2_semseg_decoder_1e-3_wd_5e-2_cosine_lsce_1e-1_dice_highreso_semseg_vdd.yaml)           | 40              |
-| FloodNet | [Config](configs/floodnet/gpcnet_mit_b1/gpcnet_mit_b1_2048x2048_bs4_ep20_adamw_lr1e-4_wd_5e-2_semseg_decoder_1e-3_wd_5e-2_cosine_lsce_1e-1_dice_highreso_semseg_floodnet.yaml) | [Config](configs/floodnet/gpcnet_mit_b2/gpcnet_mit_b2_2048x2048_bs4_ep20_adamw_lr1e-4_wd_5e-2_semseg_decoder_1e-3_wd_5e-2_cosine_lsce_1e-1_dice_highreso_semseg_floodnet.yaml) | 20              |
-
-Default settings shared by these configurations:
-
-- **Encoder:** ImageNet-pretrained MiT, `4 × 4` grids, semantic exchange enabled at all four stages.
-- **Decoder:** 64 channels, kernel size 3, 4 kernel groups, and two auxiliary segmentation heads.
-- **FES:** 40% target encoder sparsity, 10 pruning iterations, and 8 sampled `1024 × 1024` patches.
-- **Optimization:** AdamW with encoder learning rate `1e-4`, decoder learning rate `1e-3`, weight decay `0.05`, and cosine annealing.
-- **Supervision:** cross-entropy with label smoothing `0.1` plus Dice loss; each auxiliary head has weight `0.4`.
-- **Batch size:** 4 in total across training GPUs. Automatic mixed precision prefers BF16 when supported.
+Follow [Datasets and Configurations](assets/DATASETS_AND_CONFIGS.md) to prepare the data and select a configuration. Set `dataset.root_path` in the YAML file.
 
 ### Prune, Train, and Test
 
@@ -123,7 +60,7 @@ Run commands from the repository root. The wrapper accepts separate GPU lists an
 bash prune_train_test.sh CONFIG SEED PRUNE_GPUS PRUNE_ARGS TRAIN_GPUS TRAIN_ARGS TEST_GPUS TEST_ARGS
 ```
 
-For example, run GPCNet-P on UAVid with one GPU for pruning, four GPUs for training, and one GPU for testing:
+Example for GPCNet-P on UAVid:
 
 ```bash
 CONFIG="configs/uavid/gpcnet_mit_b2/gpcnet_mit_b2_2048x2048_bs4_ep40_adamw_lr1e-4_wd_5e-2_semseg_decoder_1e-3_wd_5e-2_cosine_lsce_1e-1_dice_highreso_semseg_uavid.yaml"
@@ -135,20 +72,18 @@ bash prune_train_test.sh "$CONFIG" "$SEED" \
     0 "-i -w GPCNet"
 ```
 
-| Argument      | Meaning                                                                      |
-| ------------- | ---------------------------------------------------------------------------- |
-| `-i`        | Disable Weights & Biases logging. The examples do not require a W&B service. |
-| `-s`        | Convert BatchNorm to SyncBatchNorm for training.                             |
-| `-w GPCNet` | Set the project name, which also determines the output directory.            |
-| `-r`        | Set the random seed when calling `main.py` directly.                       |
+| Argument      | Meaning                                                |
+| ------------- | ------------------------------------------------------ |
+| `-i`        | Disable Weights & Biases logging.                      |
+| `-s`        | Convert BatchNorm to SyncBatchNorm for training.       |
+| `-w GPCNet` | Set the project name used in the output path.          |
+| `-r`        | Set the random seed when calling `main.py` directly. |
 
-Pruning and standalone full-image evaluation currently require **one GPU**. Training supports multiple GPUs; the configured total batch size must be divisible by their number. For a single-GPU training run, replace `0,1,2,3` with `0`.
-
-The pruning phase saves the compact model as `last_epoch.pth` at epoch 0. Training loads it automatically and updates the checkpoint; with the supplied configurations, the wrapper then evaluates the final `last_epoch.pth`. Each phase reads its checkpoint from the corresponding YAML `reload_pth` field. Keep the same configuration, seed, and project name across these phases. Existing checkpoints are resumed automatically.
+Use **one GPU** for pruning and testing. For training, the total batch size must be divisible by the number of GPUs. Training starts from the pruned model in `last_epoch.pth`. Testing uses the updated checkpoint.
 
 ### Evaluate a Checkpoint
 
-Using the same `CONFIG` and `SEED` as above, set `test.reload_pth` to `best_iou.pth` in the existing YAML configuration to evaluate the checkpoint selected by validation IoU, then run:
+To evaluate the checkpoint with the best validation IoU, set `test.reload_pth: best_iou.pth` in the YAML configuration and run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 \
@@ -156,11 +91,11 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 \
     -w GPCNet -i
 ```
 
-Use `-p valid` for the validation split and select its checkpoint with `valid.reload_pth`. Set `test.reload_pth` to `last_epoch.pth` to evaluate the final checkpoint. A checkpoint filename is resolved within the experiment's `checkpoints/` directory; an absolute path can also be specified in YAML. The standalone evaluator reconstructs full-image predictions; the validation pass inside training computes metrics on the input tiles.
+Use `-p valid` and `valid.reload_pth` for validation. Checkpoint paths can be absolute or relative to the experiment's `checkpoints/` directory.
 
 ### Train a Dense Variant
 
-Skip the pruning phase to train GPCNet or GPCNet-S. Use a separate project name to keep dense and pruned checkpoints in different directories:
+To train GPCNet or GPCNet-S, skip pruning and use a separate project name:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 \
@@ -174,7 +109,7 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 \
 
 ### Outputs
 
-With the examples above, results are stored under:
+Results are saved to:
 
 ```text
 output/<project>/<dataset_class>/<model_class>/<config_stem>_seed_<seed>/
@@ -191,11 +126,11 @@ output/<project>/<dataset_class>/<model_class>/<config_stem>_seed_<seed>/
         └── predictions/
 ```
 
-`globals.output_root` controls the output root. The supplied configurations save complete model objects to preserve the pruned architecture; loading these checkpoints depends on the corresponding model definitions and module paths.
+Set `globals.output_root` to change the output root.
 
 ## 📈 Experimental Results
 
-The following results are reported in **Tables II–V of the [paper](https://doi.org/10.1109/TGRS.2026.3725031)**. Accuracy is test-set mIoU (%). Efficiency is measured on a single NVIDIA RTX 3090 with BF16 precision, batch size 1, an input resolution of `2048 × 2048`, and the eight-class UAVid output head.
+Results from **Tables II to V of the [paper](https://doi.org/10.1109/TGRS.2026.3725031)**. Accuracy is test mIoU (%). Efficiency is measured on one NVIDIA RTX 3090 with BF16, batch size 1, `2048 × 2048` inputs, and the eight-class UAVid output head.
 
 | Model     | Encoder | Encoder sparsity | UAVid           | VDD             | FloodNet        | Params (M)     | FLOPs (G)        | FPS             |
 | --------- | ------- | ---------------- | --------------- | --------------- | --------------- | -------------- | ---------------- | --------------- |
@@ -204,7 +139,7 @@ The following results are reported in **Tables II–V of the [paper](https://doi
 | GPCNet-S  | MiT-B1  | 0%               | 70.95           | 80.44           | 76.73           | 14.07          | 762.36           | 15.60           |
 | GPCNet-SP | MiT-B1  | 40%              | 70.65           | 79.94           | 76.21           | **8.76** | **493.69** | **18.88** |
 
-For FloodNet, the paper averages metrics over the **nine foreground classes**, excluding Background. The configurations retain all ten output classes and export per-class metrics; average the nine foreground entries when comparing with the table. Metric values in `result.txt` are fractions rather than percentages. The values above are published results, not measurements from a new run of this checkout.
+FloodNet mIoU averages the **nine foreground classes**, excluding Background.
 
 ## 🎓 Citation
 

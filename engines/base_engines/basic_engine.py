@@ -24,7 +24,7 @@ from torch.utils.data.distributed import DistributedSampler
 import datasets
 import models
 import schedulers
-from datasets import dali_pipeline, transmforms
+from datasets import dali_pipeline, transforms
 from datasets.base_datasets.classification import ClassificationDataset
 from datasets.base_datasets.segmentation import SegmentationDataset
 from tools import get_logger, utils

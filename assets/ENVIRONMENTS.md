@@ -210,4 +210,4 @@ def mamba_inner_fn_no_out_proj(
 
 Install selective_scan
 
-Follow the instructions at https://github.com/MzeroMiko/VMamba to install selective_scan from the kernel directory. Only `oflex` is installed by default; modify the `MODES` setting in `setup.py` to install the components you need.
+Follow the instructions at https://github.com/MzeroMiko/VMamba to install selective_scan from the kernel directory. Only `oflex` is installed by default. Modify the `MODES` setting in `setup.py` to install the components you need.
