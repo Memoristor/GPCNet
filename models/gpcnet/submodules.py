@@ -1,6 +1,6 @@
 # coding=utf-8
 
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
@@ -96,9 +96,9 @@ class SpatialVariableLowPassKernel(nn.Module):
 
     def generate_weights(self, x):
         b, c, H, W = x.size()
-        assert H % self.spatial_reduction == 0 and W % self.spatial_reduction == 0, (
-            "Input feature size must be divisible by spatial_reduction."
-        )
+        assert (
+            H % self.spatial_reduction == 0 and W % self.spatial_reduction == 0
+        ), "Input feature size must be divisible by spatial_reduction."
         h = H // self.spatial_reduction
         w = W // self.spatial_reduction
         x = F.pixel_unshuffle(x, self.spatial_reduction)
@@ -185,17 +185,13 @@ class SpatialVariableDynamicDilationKernel(nn.Module):
         kernel_size: size of the dilation kernel
         groups: number of filter groups
         stride: convolution stride
-        min_dilation: minimum dilation value for stability (default: -1, meaning no minimum constraint)
-        max_dilation: maximum dilation value for stability (optional)
     """
 
-    def __init__(self, channels: int, kernel_size: int, groups: int, min_dilation=-1, max_dilation=None):
+    def __init__(self, channels: int, kernel_size: int, groups: int):
         super().__init__()
         self.channels = channels
         self.kernel_size = kernel_size
         self.groups = groups
-        self.min_dilation = min_dilation
-        self.max_dilation = max_dilation
 
         self.k2 = self.kernel_size * self.kernel_size
 
@@ -207,14 +203,7 @@ class SpatialVariableDynamicDilationKernel(nn.Module):
         assert c % self.groups == 0, "Input channels must be divisible by number of groups."
         weights = self.weights_gen(x)
         dilation_map = self.dilations_gen(x)
-        if not hasattr(self, "max_dilation"):
-            self.max_dilation = None
-        if not hasattr(self, "min_dilation"):
-            self.min_dilation = 1.0
-        if self.max_dilation is not None:
-            dilation_map = F.hardtanh(F.relu(dilation_map) + 1.0, min_val=self.min_dilation, max_val=self.max_dilation)
-        else:
-            dilation_map = F.hardtanh(F.relu(dilation_map) + 1.0, min_val=self.min_dilation)
+        dilation_map = F.relu(dilation_map) + 1.0
         return weights, dilation_map
 
     def forward(self, x, weight, dilation_map):
@@ -244,22 +233,12 @@ class SpatialAdaptiveFusion(nn.Module):
         spatial_reduction: feature stride between high-level and low-level features
     """
 
-    def __init__(
-        self,
-        channels: int,
-        kernel_size: int,
-        groups: int,
-        spatial_reduction: int,
-        min_dilation=-1,
-        max_dilation=None,
-    ):
+    def __init__(self, channels: int, kernel_size: int, groups: int, spatial_reduction: int):
         super().__init__()
 
         self.channels = channels
         self.kernel_size = kernel_size
         self.spatial_reduction = spatial_reduction
-        self.min_dilation = min_dilation
-        self.max_dilation = max_dilation
 
         self.ll_proj = nn.Conv2d(channels, channels, kernel_size=1, bias=False)
         self.hl_proj = nn.Conv2d(channels, channels, kernel_size=1, bias=False)
@@ -268,13 +247,7 @@ class SpatialAdaptiveFusion(nn.Module):
         self.init_hpk = SpatialVariableHighPassKernel(channels, kernel_size, groups)
         self.init_fuse_proj = nn.Conv2d(2 * channels, channels, kernel_size=1, bias=True)
 
-        self.ddk = SpatialVariableDynamicDilationKernel(
-            channels,
-            kernel_size,
-            groups,
-            min_dilation=self.min_dilation,
-            max_dilation=self.max_dilation,
-        )
+        self.ddk = SpatialVariableDynamicDilationKernel(channels, kernel_size, groups)
 
         self.final_lpk = SpatialVariableLowPassKernel(channels, kernel_size, groups, spatial_reduction)
         self.final_hpk = SpatialVariableHighPassKernel(channels, kernel_size, groups)
@@ -283,9 +256,9 @@ class SpatialAdaptiveFusion(nn.Module):
     def forward(self, high_level, low_level):
         b, c, h, w = high_level.size()
         b, c, H, W = low_level.size()
-        assert H % h == 0 and H // h == self.spatial_reduction and W % w == 0 and W // w == self.spatial_reduction, (
-            "Low-level feature size must be spatial_reduction times high-level feature size."
-        )
+        assert (
+            H % h == 0 and H // h == self.spatial_reduction and W % w == 0 and W // w == self.spatial_reduction
+        ), "Low-level feature size must be spatial_reduction times high-level feature size."
 
         high_level = self.hl_proj(high_level)
         low_level = self.ll_proj(low_level)
@@ -328,19 +301,11 @@ class ProgressFeatureFusion(nn.Module):
         feature_dims: List[int] = [48, 96, 240, 384],
         decoder_dims: int = 128,
         kernel_size: int = 3,
-        min_dilation: int = -1,
-        max_dilation: Optional[int] = None,
         groups: int = 4,
         aux_heads: bool = False,
     ):
         super().__init__()
 
-        self.num_classes = num_classes
-        self.image_size = image_size
-        self.feature_dims = feature_dims
-        self.decoder_dims = decoder_dims
-        self.kernel_size = kernel_size
-        self.groups = groups
         self.aux_heads = aux_heads
 
         self.feats_convs = nn.ModuleList()
@@ -348,16 +313,7 @@ class ProgressFeatureFusion(nn.Module):
         for i, f in enumerate(feature_dims):
             self.feats_convs.append(ConvBNSiLU(f, decoder_dims, kernel_size=1))
             if i < len(feature_dims) - 1:
-                self.feats_fusion.append(
-                    SpatialAdaptiveFusion(
-                        decoder_dims,
-                        kernel_size,
-                        groups,
-                        spatial_reduction=2,
-                        min_dilation=min_dilation,
-                        max_dilation=max_dilation,
-                    )
-                )
+                self.feats_fusion.append(SpatialAdaptiveFusion(decoder_dims, kernel_size, groups, spatial_reduction=2))
 
         self.seg_head = SegmentationHead(decoder_dims, num_classes, upsample_scale=4)
 

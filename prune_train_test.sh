@@ -24,7 +24,7 @@ CUDA_VISIBLE_DEVICES="${PRUNE_GPUS}" torchrun \
     --nproc_per_node ${NUM_PRUNE_GPUS} \
     --nnodes 1 \
     --master_port ${MASTER_PORT} \
-    main.py --wandb_project HighReso-SemSeg-V3 \
+    main.py --wandb_project GPCNet \
     --yaml_config ${CONFIG} \
     --proc_phase prune \
     --random_seed ${SEED} ${PRUNE_ARGS} 
@@ -33,7 +33,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_GPUS}" torchrun \
     --nproc_per_node ${NUM_TRAIN_GPUS} \
     --nnodes 1 \
     --master_port ${MASTER_PORT} \
-    main.py --wandb_project HighReso-SemSeg-V3 \
+    main.py --wandb_project GPCNet \
     --yaml_config ${CONFIG} \
     --proc_phase train \
     --random_seed ${SEED} ${TRAIN_ARGS} 
@@ -42,7 +42,7 @@ CUDA_VISIBLE_DEVICES="${TEST_GPUS}" torchrun \
     --nproc_per_node ${NUM_TEST_GPUS} \
     --nnodes 1 \
     --master_port ${MASTER_PORT} \
-    main.py --wandb_project HighReso-SemSeg-V3 \
+    main.py --wandb_project GPCNet \
     --yaml_config ${CONFIG} \
     --proc_phase test \
     --random_seed ${SEED} ${TEST_ARGS} 

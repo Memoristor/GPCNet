@@ -30,12 +30,6 @@ def parse_args():
         help="The current phase of the program",
     )
     parser.add_argument(
-        "-s",
-        "--convert_syncbn",
-        action="store_true",
-        help="Whether convert BatchNorm to SyncBatchNorm",
-    )
-    parser.add_argument(
         "-w",
         "--wandb_project",
         type=str,
@@ -75,13 +69,12 @@ if __name__ == "__main__":
     config = OmegaConf.load(args.yaml_config)
 
     # Add configurations
-    config.convert_syncbn = args.convert_syncbn
     config.random_seed = args.random_seed
     config.disable_wandb = args.disable_wandb
 
     # Set wandb url and api key
-    os.environ["WANDB_BASE_URL"] = "YOUR_WANDB_URL"  # Replace with your actual WandB URL
-    os.environ["WANDB_API_KEY"] = "YOUR_WANDB_API_KEY"  # Replace with your actual WandB API key
+    os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai" 
+    os.environ["WANDB_API_KEY"] = "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"
     
     # Set cuda device to avoid unblanced distributed data parallel
     torch.cuda.set_device(local_rank())

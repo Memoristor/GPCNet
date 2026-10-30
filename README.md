@@ -68,18 +68,17 @@ SEED=212
 
 bash prune_train_test.sh "$CONFIG" "$SEED" \
     0 "-i -w GPCNet" \
-    0,1,2,3 "-i -s -w GPCNet" \
+    0,1,2,3 "-i -w GPCNet" \
     0 "-i -w GPCNet"
 ```
 
 | Argument      | Meaning                                                |
 | ------------- | ------------------------------------------------------ |
 | `-i`        | Disable Weights & Biases logging.                      |
-| `-s`        | Convert BatchNorm to SyncBatchNorm for training.       |
 | `-w GPCNet` | Set the project name used in the output path.          |
 | `-r`        | Set the random seed when calling `main.py` directly. |
 
-Use **one GPU** for pruning and testing. For training, the total batch size must be divisible by the number of GPUs. Training starts from the pruned model in `last_epoch.pth`. Testing uses the updated checkpoint.
+BatchNorm is converted to SyncBatchNorm automatically. Use **one GPU** for pruning and testing. For training, the total batch size must be divisible by the number of GPUs. Training starts from the pruned model in `last_epoch.pth`. Testing uses the updated checkpoint.
 
 ### Evaluate a Checkpoint
 
@@ -100,7 +99,7 @@ To train GPCNet or GPCNet-S, skip pruning and use a separate project name:
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 \
     main.py -c "$CONFIG" -p train -r "$SEED" \
-    -w GPCNet-Dense -s -i
+    -w GPCNet-Dense -i
 
 CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 \
     main.py -c "$CONFIG" -p test -r "$SEED" \

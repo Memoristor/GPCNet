@@ -777,7 +777,7 @@ class BasicEngine:
             1. Determine epoch and is_resumed status
             2. Handle model EMA for inference if configured
             3. Move optimizer states to correct device
-            4. Convert BatchNorm to SyncBatchNorm if configured
+            4. Convert BatchNorm to SyncBatchNorm
             5. Wrap model in DistributedDataParallel
 
         Note:
@@ -822,9 +822,8 @@ class BasicEngine:
             else:
                 self._move_optimizer_to_device(self.optimizer, device)
 
-        # Convert BatchNorm to SyncBatchNorm if configured
-        if self.config.convert_syncbn:
-            self.model = SyncBatchNorm.convert_sync_batchnorm(self.model)
+        # Convert BatchNorm to SyncBatchNorm
+        self.model = SyncBatchNorm.convert_sync_batchnorm(self.model)
 
         # Wrap model in DistributedDataParallel
         self.model = DistributedDataParallel(

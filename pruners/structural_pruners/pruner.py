@@ -206,6 +206,7 @@ class ModuleSparsityPruner:
             nn.BatchNorm1d,
             nn.BatchNorm2d,
             nn.BatchNorm3d,
+            nn.SyncBatchNorm,
             nn.LayerNorm,
             nn.GroupNorm,
             nn.MultiheadAttention,

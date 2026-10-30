@@ -65,9 +65,9 @@ class SparsityAnalyzer:
                     "in_channels": module.in_features,
                     "params": self._count_module_params(module),
                 }
-            elif isinstance(module, nn.BatchNorm2d):
+            elif isinstance(module, (nn.BatchNorm2d, nn.SyncBatchNorm)):
                 self._original_state[module_name] = {
-                    "type": "BatchNorm2d",
+                    "type": type(module).__name__,
                     "out_channels": module.num_features,
                     "in_channels": module.num_features,
                     "params": self._count_module_params(module),
@@ -114,7 +114,7 @@ class SparsityAnalyzer:
             elif isinstance(module, nn.Linear):
                 pruned_out = module.out_features
                 pruned_in = module.in_features
-            elif isinstance(module, nn.BatchNorm2d):
+            elif isinstance(module, (nn.BatchNorm2d, nn.SyncBatchNorm)):
                 pruned_out = module.num_features
                 pruned_in = module.num_features
             elif isinstance(module, nn.LayerNorm):

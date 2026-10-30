@@ -29,6 +29,8 @@ class BasicLossModule(nn.Module):
         batch_weight: bool (default True). If true, the whole batch will be used to calculate weights
         size_average: bool (default True). Loss will be divided by (h * w)
         batch_average: bool (default True). Loss will be divided by (n)
+        upper_bound: retained for compatibility with the original weighting method
+        alpha: float (default 1.0). Nonnegative strength of logarithmic class weighting
     """
 
     def __init__(
@@ -38,9 +40,11 @@ class BasicLossModule(nn.Module):
         batch_weight=True,
         size_average=True,
         batch_average=True,
-        upper_bound=1.0,
+        alpha=1.0,
     ):
         super(BasicLossModule, self).__init__()
+        if alpha < 0:
+            raise ValueError("alpha must be nonnegative")
 
         # Init custom weight
         if custom_weight is not None:
@@ -55,20 +59,24 @@ class BasicLossModule(nn.Module):
         self.batch_weight = batch_weight
         self.size_average = size_average
         self.batch_average = batch_average
-        self.upper_bound = upper_bound
+        self.alpha = alpha
 
     def calculate_weights(self, target, num_classes):
-        """
-        Calculate weights of classes based on the training crop
+        """Return 1 - alpha * log(class frequency) for classes in the batch.
 
-        Params:
-            target: 3-D torch.Tensor. The input target and the shape is (n, h, w)
-            num_classes: int. The number of classes
+        Ignore labels are excluded from the frequencies. Absent classes retain
+        weight 1, including when the entire batch is ignored. No upper bound is
+        applied to weights for present classes.
         """
-        hist = torch.histc(target, bins=num_classes, min=0, max=num_classes - 1)
-        hist = hist / (hist.sum() + 1e-10)
-        hist = ((hist != 0) * self.upper_bound * (1 - hist)) + 1
-        return hist
+        hist = torch.histc(target.float(), bins=num_classes, min=0, max=num_classes - 1)
+        if 0 <= self.ignore_index < num_classes:
+            hist[self.ignore_index] = 0
+        freq = hist / hist.sum().clamp_min(1)
+
+        weights = torch.ones_like(freq)
+        present = freq > 0
+        weights[present] = 1 - self.alpha * torch.log(freq[present])
+        return weights
 
     def forward(self, *args, **kwags):
         raise NotImplementedError("function has not been implemented")

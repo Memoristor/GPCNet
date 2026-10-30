@@ -162,6 +162,7 @@ cython_debug/
 *.pth
 *.npz
 *.tar
-backup*/
+backup/
 artifacts/
+tests/
 .vscode/

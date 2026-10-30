@@ -71,7 +71,7 @@ def copynet(net, replace_batchnorm=True, replace_avgpool=True):
     cloned_net = copy.deepcopy(net)
     if replace_batchnorm:
         for module in cloned_net.modules():
-            if isinstance(module, nn.BatchNorm2d):
+            if isinstance(module, (nn.BatchNorm2d, nn.SyncBatchNorm)):
                 module.forward = types.MethodType(IgnoreBatchnorm2d.forward, module)
     if replace_avgpool:
         for module in cloned_net.modules():

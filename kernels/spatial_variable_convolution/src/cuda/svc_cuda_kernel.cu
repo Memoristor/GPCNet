@@ -1,3 +1,4 @@
+#include <ATen/AccumulateType.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
 #include <cuda_bf16.h>
@@ -17,61 +18,21 @@ inline int GET_BLOCKS(const int N) {
   return std::min(kMaxGridNum, (N + CUDA_NUM_THREADS - 1) / CUDA_NUM_THREADS);
 }
 
-// Atomic add for c10::Half that works for all CUDA architectures
-__device__ __forceinline__ void atomic_add(c10::Half* address, c10::Half val) {
-#if __CUDA_ARCH__ >= 700
-  atomicAdd(reinterpret_cast<__half*>(address), static_cast<__half>(val));
-#else
-  unsigned int* address_as_ui = (unsigned int*)((char*)address - ((size_t)address & 2));
-  unsigned int old = *address_as_ui;
-  unsigned int assumed;
-
-  do {
-    assumed = old;
-    __half_raw hsum;
-    hsum.x = (size_t)address & 2 ? (old >> 16) : (old & 0xffff);
-    half tmpres = __hadd(reinterpret_cast<const __half&>(hsum), static_cast<__half>(val));
-    hsum = __half_raw(tmpres);
-    old = (size_t)address & 2 ? (old & 0xffff) | (hsum.x << 16) : (old & 0xffff0000) | hsum.x;
-    old = atomicCAS(address_as_ui, assumed, old);
-  } while (assumed != old);
-#endif
-}
-
-// Atomic add for at::BFloat16 that works for all CUDA architectures
-__device__ __forceinline__ void atomic_add(at::BFloat16* address, at::BFloat16 val) {
-#if __CUDA_ARCH__ >= 800
-  atomicAdd(reinterpret_cast<__nv_bfloat16*>(address), static_cast<__nv_bfloat16>(val));
-#else
-  unsigned int* address_as_ui = (unsigned int*)((char*)address - ((size_t)address & 2));
-  unsigned int old = *address_as_ui;
-  unsigned int assumed;
-
-  do {
-    assumed = old;
-    __nv_bfloat16_raw hsum;
-    hsum.x = (size_t)address & 2 ? (old >> 16) : (old & 0xffff);
-    __nv_bfloat16 tmp =
-        __hadd(*reinterpret_cast<__nv_bfloat16*>(&hsum), static_cast<__nv_bfloat16>(val));
-    hsum = *reinterpret_cast<__nv_bfloat16_raw*>(&tmp);
-    old = (size_t)address & 2 ? (old & 0xffff) | (hsum.x << 16) : (old & 0xffff0000) | hsum.x;
-    old = atomicCAS(address_as_ui, assumed, old);
-  } while (assumed != old);
-#endif
-}
-
+// Input gradients accumulate in FP32 for FP16/BF16, or FP64 for FP64 inputs.
 // Overload for float
 __device__ __forceinline__ void atomic_add(float* address, float val) { atomicAdd(address, val); }
 
 // Overload for double
 __device__ __forceinline__ void atomic_add(double* address, double val) { atomicAdd(address, val); }
 
+// Coordinates, interpolation and reductions use FP32 for FP16/BF16 inputs.
+// FP64 inputs retain FP64 arithmetic. Tensor storage keeps the input dtype.
 // Bilinear interpolation function
-template <typename scalar_t>
-__device__ scalar_t bilinear_interpolate(const scalar_t* input, const int height, const int width,
-                                         scalar_t h, scalar_t w) {
+template <typename scalar_t, typename acc_t>
+__device__ acc_t bilinear_interpolate(const scalar_t* input, const int height, const int width,
+                                     acc_t h, acc_t w) {
   if (h <= -1 || height <= h || w <= -1 || width <= w) {
-    return static_cast<scalar_t>(0);
+    return static_cast<acc_t>(0);
   }
 
   int h_low = floor(h);
@@ -79,21 +40,21 @@ __device__ scalar_t bilinear_interpolate(const scalar_t* input, const int height
   int h_high = h_low + 1;
   int w_high = w_low + 1;
 
-  scalar_t lh = h - h_low;
-  scalar_t lw = w - w_low;
-  scalar_t hh = static_cast<scalar_t>(1) - lh;
-  scalar_t hw = static_cast<scalar_t>(1) - lw;
+  acc_t lh = h - h_low;
+  acc_t lw = w - w_low;
+  acc_t hh = static_cast<acc_t>(1) - lh;
+  acc_t hw = static_cast<acc_t>(1) - lw;
 
-  scalar_t v1 = static_cast<scalar_t>(0);
+  acc_t v1 = static_cast<acc_t>(0);
   if (h_low >= 0 && w_low >= 0) v1 = input[h_low * width + w_low];
 
-  scalar_t v2 = static_cast<scalar_t>(0);
+  acc_t v2 = static_cast<acc_t>(0);
   if (h_low >= 0 && w_high < width) v2 = input[h_low * width + w_high];
 
-  scalar_t v3 = static_cast<scalar_t>(0);
+  acc_t v3 = static_cast<acc_t>(0);
   if (h_high < height && w_low >= 0) v3 = input[h_high * width + w_low];
 
-  scalar_t v4 = static_cast<scalar_t>(0);
+  acc_t v4 = static_cast<acc_t>(0);
   if (h_high < height && w_high < width) v4 = input[h_high * width + w_high];
 
   return hh * hw * v1 + hh * lw * v2 + lh * hw * v3 + lh * lw * v4;
@@ -108,6 +69,7 @@ __global__ void spatial_variable_convolution_forward_kernel(
     const int stride_h, const int stride_w, const int pad_h, const int pad_w, 
     const int dilation_h, const int dilation_w, const int groups, const int channels_per_group, 
     scalar_t* output) {
+  using acc_t = at::acc_type<scalar_t, true>;
   
   const int kernel_h_center = (kernel_h - 1) >> 1;
   const int kernel_w_center = (kernel_w - 1) >> 1;
@@ -125,7 +87,7 @@ __global__ void spatial_variable_convolution_forward_kernel(
     const int group_idx = c_out / channels_per_group;
     
     // Initialize output value
-    scalar_t output_value = static_cast<scalar_t>(0);
+    acc_t output_value = static_cast<acc_t>(0);
     
     // Input channel is the same as output channel
     const int c_in = c_out;
@@ -134,26 +96,26 @@ __global__ void spatial_variable_convolution_forward_kernel(
     // For each kernel position
     for (int kh = 0; kh < kernel_h; kh++) {
       for (int kw = 0; kw < kernel_w; kw++) {
-        scalar_t input_value;
+        acc_t input_value;
         
         // Base position in input (without kernel offsets)
-        const scalar_t h_in_base = h_out * stride_h - pad_h;
-        const scalar_t w_in_base = w_out * stride_w - pad_w;
+        const int h_in_base = h_out * stride_h - pad_h;
+        const int w_in_base = w_out * stride_w - pad_w;
         
         if (UseDilationMap) {
           // With dilation map - use bilinear interpolation
           const int dilation_map_idx = b * groups * height_out * width_out +
                                      group_idx * height_out * width_out + 
                                      h_out * width_out + w_out;
-          const scalar_t dilation_value = dilation_map[dilation_map_idx];
+          const acc_t dilation_value = dilation_map[dilation_map_idx];
           
           // Calculate center-relative offset for correct alignment
-          const scalar_t h_offset = (kh - kernel_h_center) * dilation_h * dilation_value;
-          const scalar_t w_offset = (kw - kernel_w_center) * dilation_w * dilation_value;
+          const acc_t h_offset = (kh - kernel_h_center) * dilation_h * dilation_value;
+          const acc_t w_offset = (kw - kernel_w_center) * dilation_w * dilation_value;
           
           // Final sampling position (center-aligned)
-          const scalar_t h_in = h_in_base + h_offset + kernel_h_ref;
-          const scalar_t w_in = w_in_base + w_offset + kernel_w_ref;
+          const acc_t h_in = h_in_base + h_offset + kernel_h_ref;
+          const acc_t w_in = w_in_base + w_offset + kernel_w_ref;
           
           input_value = bilinear_interpolate(input_ptr, height, width, h_in, w_in);
         } else {
@@ -168,7 +130,7 @@ __global__ void spatial_variable_convolution_forward_kernel(
           if (h_in >= 0 && h_in < height && w_in >= 0 && w_in < width) {
             input_value = input_ptr[h_in * width + w_in];
           } else {
-            input_value = static_cast<scalar_t>(0); // Zero padding
+            input_value = static_cast<acc_t>(0); // Zero padding
           }
         }
         
@@ -179,7 +141,7 @@ __global__ void spatial_variable_convolution_forward_kernel(
                              k_idx * (height_out * width_out) +
                              h_out * width_out + w_out;
         
-        const scalar_t weight_value = weight[weight_idx];
+        const acc_t weight_value = weight[weight_idx];
         
         // Accumulate output
         output_value += input_value * weight_value;
@@ -187,7 +149,7 @@ __global__ void spatial_variable_convolution_forward_kernel(
     }
     
     // Store output
-    output[index] = output_value;
+    output[index] = static_cast<scalar_t>(output_value);
   }
 }
 
@@ -199,7 +161,8 @@ __global__ void spatial_variable_convolution_backward_input_kernel(
     const int height_out, const int width_out, const int kernel_h, const int kernel_w,
     const int stride_h, const int stride_w, const int pad_h, const int pad_w, 
     const int dilation_h, const int dilation_w, const int groups, const int channels_per_group, 
-    scalar_t* grad_input) {
+    at::acc_type<scalar_t, true>* grad_input) {
+  using acc_t = at::acc_type<scalar_t, true>;
   
   const int kernel_h_center = (kernel_h - 1) >> 1;
   const int kernel_w_center = (kernel_w - 1) >> 1;
@@ -216,10 +179,10 @@ __global__ void spatial_variable_convolution_backward_input_kernel(
     const int group_idx = c_out / channels_per_group;
     
     // Get gradient value for this output
-    const scalar_t grad_val = grad_output[index];
+    const acc_t grad_val = grad_output[index];
     
     // If gradient is zero, skip computation
-    if (grad_val == static_cast<scalar_t>(0)) {
+    if (grad_val == static_cast<acc_t>(0)) {
       continue;
     }
     
@@ -227,8 +190,8 @@ __global__ void spatial_variable_convolution_backward_input_kernel(
     const int c_in = c_out;
     
     // Base position in input (without kernel offsets)
-    const scalar_t h_in_base = h_out * stride_h - pad_h;
-    const scalar_t w_in_base = w_out * stride_w - pad_w;
+    const int h_in_base = h_out * stride_h - pad_h;
+    const int w_in_base = w_out * stride_w - pad_w;
     
     // For each kernel position
     for (int kh = 0; kh < kernel_h; kh++) {
@@ -239,10 +202,10 @@ __global__ void spatial_variable_convolution_backward_input_kernel(
                              group_idx * (kernel_h * kernel_w * height_out * width_out) +
                              k_idx * (height_out * width_out) +
                              h_out * width_out + w_out;
-        const scalar_t weight_val = weight[weight_idx];
+        const acc_t weight_val = weight[weight_idx];
         
         // If weight is zero, skip computation
-        if (weight_val == static_cast<scalar_t>(0)) {
+        if (weight_val == static_cast<acc_t>(0)) {
           continue;
         }
         
@@ -251,15 +214,15 @@ __global__ void spatial_variable_convolution_backward_input_kernel(
           const int dilation_map_idx = b * groups * height_out * width_out +
                                      group_idx * height_out * width_out + 
                                      h_out * width_out + w_out;
-          const scalar_t dilation_value = dilation_map[dilation_map_idx];
+          const acc_t dilation_value = dilation_map[dilation_map_idx];
           
           // Calculate center-relative offset
-          const scalar_t h_offset = (kh - kernel_h_center) * dilation_h * dilation_value;
-          const scalar_t w_offset = (kw - kernel_w_center) * dilation_w * dilation_value;
+          const acc_t h_offset = (kh - kernel_h_center) * dilation_h * dilation_value;
+          const acc_t w_offset = (kw - kernel_w_center) * dilation_w * dilation_value;
           
           // Final sampling position (center-aligned)
-          const scalar_t h_in = h_in_base + h_offset + kernel_h_ref;
-          const scalar_t w_in = w_in_base + w_offset + kernel_w_ref;
+          const acc_t h_in = h_in_base + h_offset + kernel_h_ref;
+          const acc_t w_in = w_in_base + w_offset + kernel_w_ref;
           
           // Skip if outside input boundaries
           if (h_in <= -1 || h_in >= height || w_in <= -1 || w_in >= width) {
@@ -272,20 +235,20 @@ __global__ void spatial_variable_convolution_backward_input_kernel(
           int h_high = h_low + 1;
           int w_high = w_low + 1;
           
-          scalar_t lh = h_in - h_low;
-          scalar_t lw = w_in - w_low;
-          scalar_t hh = static_cast<scalar_t>(1) - lh;
-          scalar_t hw = static_cast<scalar_t>(1) - lw;
+          acc_t lh = h_in - h_low;
+          acc_t lw = w_in - w_low;
+          acc_t hh = static_cast<acc_t>(1) - lh;
+          acc_t hw = static_cast<acc_t>(1) - lw;
           
           // Calculate gradient contribution to each corner
-          const scalar_t grad_product = grad_val * weight_val;
-          const scalar_t grad_h0w0 = grad_product * hh * hw;
-          const scalar_t grad_h0w1 = grad_product * hh * lw;
-          const scalar_t grad_h1w0 = grad_product * lh * hw;
-          const scalar_t grad_h1w1 = grad_product * lh * lw;
+          const acc_t grad_product = grad_val * weight_val;
+          const acc_t grad_h0w0 = grad_product * hh * hw;
+          const acc_t grad_h0w1 = grad_product * hh * lw;
+          const acc_t grad_h1w0 = grad_product * lh * hw;
+          const acc_t grad_h1w1 = grad_product * lh * lw;
           
           // Get base pointer for input gradient
-          scalar_t* grad_input_ptr = grad_input + (b * channels + c_in) * height * width;
+          acc_t* grad_input_ptr = grad_input + (b * channels + c_in) * height * width;
           
           // Accumulate gradients at each corner point
           if (h_low >= 0 && h_low < height && w_low >= 0 && w_low < width) {
@@ -334,6 +297,7 @@ __global__ void spatial_variable_convolution_backward_weight_kernel(
     const int stride_h, const int stride_w, const int pad_h, const int pad_w, 
     const int dilation_h, const int dilation_w, const int groups, const int channels_per_group, 
     scalar_t* grad_weight) {
+  using acc_t = at::acc_type<scalar_t, true>;
       
   const int kernel_h_center = (kernel_h - 1) >> 1;
   const int kernel_w_center = (kernel_w - 1) >> 1;
@@ -352,45 +316,45 @@ __global__ void spatial_variable_convolution_backward_weight_kernel(
     const int kw = k_idx % kernel_w;
     
     // Base position in input (without kernel offsets)
-    const scalar_t h_in_base = h_out * stride_h - pad_h;
-    const scalar_t w_in_base = w_out * stride_w - pad_w;
+    const int h_in_base = h_out * stride_h - pad_h;
+    const int w_in_base = w_out * stride_w - pad_w;
     
     // Calculate channel range for this group
     const int c_start = g * channels_per_group;
     const int c_end = (g + 1) * channels_per_group;
     
-    scalar_t grad_weight_val = static_cast<scalar_t>(0);
+    acc_t grad_weight_val = static_cast<acc_t>(0);
     
     if (UseDilationMap) {
       // Get dilation value for this location
       const int dilation_map_idx = b * groups * height_out * width_out +
                                  g * height_out * width_out + 
                                  h_out * width_out + w_out;
-      const scalar_t dilation_value = dilation_map[dilation_map_idx];
+      const acc_t dilation_value = dilation_map[dilation_map_idx];
       
       // Calculate center-relative offset
-      const scalar_t h_offset = (kh - kernel_h_center) * dilation_h * dilation_value;
-      const scalar_t w_offset = (kw - kernel_w_center) * dilation_w * dilation_value;
+      const acc_t h_offset = (kh - kernel_h_center) * dilation_h * dilation_value;
+      const acc_t w_offset = (kw - kernel_w_center) * dilation_w * dilation_value;
       
       // Final input coordinates (center-aligned)
-      const scalar_t h_in = h_in_base + h_offset + kernel_h_ref;
-      const scalar_t w_in = w_in_base + w_offset + kernel_w_ref;
+      const acc_t h_in = h_in_base + h_offset + kernel_h_ref;
+      const acc_t w_in = w_in_base + w_offset + kernel_w_ref;
       
       // Skip if completely outside input boundaries
       if (h_in <= -1 || h_in >= height || w_in <= -1 || w_in >= width) {
-        grad_weight_val = static_cast<scalar_t>(0);
+        grad_weight_val = static_cast<acc_t>(0);
       } else {
         // Accumulate gradient from all channels in this group
         for (int c = c_start; c < c_end; c++) {
           // Get input value using bilinear interpolation
           const scalar_t* input_ptr = input + (b * channels + c) * height * width;
-          const scalar_t input_val = bilinear_interpolate(input_ptr, height, width, h_in, w_in);
+          const acc_t input_val = bilinear_interpolate(input_ptr, height, width, h_in, w_in);
           
           // Get output gradient
           const int grad_out_idx = b * (channels * height_out * width_out) +
                                    c * (height_out * width_out) +
                                    h_out * width_out + w_out;
-          const scalar_t grad_out_val = grad_output[grad_out_idx];
+          const acc_t grad_out_val = grad_output[grad_out_idx];
           
           // Accumulate contribution
           grad_weight_val += input_val * grad_out_val;
@@ -406,18 +370,18 @@ __global__ void spatial_variable_convolution_backward_weight_kernel(
       
       // Skip if outside valid region
       if (h_in < 0 || h_in >= height || w_in < 0 || w_in >= width) {
-        grad_weight_val = static_cast<scalar_t>(0);
+        grad_weight_val = static_cast<acc_t>(0);
       } else {
         // Accumulate from all channels in this group
         for (int c = c_start; c < c_end; c++) {
           // Get input value directly
-          const scalar_t input_val = input[(b * channels + c) * height * width + h_in * width + w_in];
+          const acc_t input_val = input[(b * channels + c) * height * width + h_in * width + w_in];
           
           // Get output gradient
           const int grad_out_idx = b * (channels * height_out * width_out) +
                                    c * (height_out * width_out) +
                                    h_out * width_out + w_out;
-          const scalar_t grad_out_val = grad_output[grad_out_idx];
+          const acc_t grad_out_val = grad_output[grad_out_idx];
           
           // Accumulate contribution
           grad_weight_val += input_val * grad_out_val;
@@ -426,7 +390,7 @@ __global__ void spatial_variable_convolution_backward_weight_kernel(
     }
     
     // Store weight gradient
-    grad_weight[index] = grad_weight_val;
+    grad_weight[index] = static_cast<scalar_t>(grad_weight_val);
   }
 }
 
@@ -439,6 +403,7 @@ __global__ void spatial_variable_convolution_backward_dilation_kernel(
     const int kernel_w, const int stride_h, const int stride_w, const int pad_h, const int pad_w, 
     const int dilation_h, const int dilation_w, const int groups, const int channels_per_group, 
     scalar_t* grad_dilation_map) {
+  using acc_t = at::acc_type<scalar_t, true>;
       
   const int kernel_h_center = (kernel_h - 1) >> 1;
   const int kernel_w_center = (kernel_w - 1) >> 1;
@@ -453,18 +418,18 @@ __global__ void spatial_variable_convolution_backward_dilation_kernel(
     const int b = index / (width_out * height_out * groups);
     
     // Base position in input (without kernel offsets)
-    const scalar_t h_in_base = h_out * stride_h - pad_h;
-    const scalar_t w_in_base = w_out * stride_w - pad_w;
+    const int h_in_base = h_out * stride_h - pad_h;
+    const int w_in_base = w_out * stride_w - pad_w;
     
     // Get channel range for this group
     const int c_start = g * channels_per_group;
     const int c_end = (g + 1) * channels_per_group;
     
     // Get current dilation value
-    const scalar_t dilation_value = dilation_map[index];
+    const acc_t dilation_value = dilation_map[index];
     
     // Initialize gradient
-    scalar_t grad_dilation = static_cast<scalar_t>(0);
+    acc_t grad_dilation = static_cast<acc_t>(0);
     
     // Accumulate gradient from all channels in the group
     for (int c = c_start; c < c_end; c++) {
@@ -472,10 +437,10 @@ __global__ void spatial_variable_convolution_backward_dilation_kernel(
       const int grad_out_idx = b * (channels * height_out * width_out) +
                                c * (height_out * width_out) + 
                                h_out * width_out + w_out;
-      const scalar_t grad_out_val = grad_output[grad_out_idx];
+      const acc_t grad_out_val = grad_output[grad_out_idx];
       
       // Skip if gradient is zero
-      if (grad_out_val == static_cast<scalar_t>(0)) {
+      if (grad_out_val == static_cast<acc_t>(0)) {
         continue;
       }
       
@@ -491,20 +456,20 @@ __global__ void spatial_variable_convolution_backward_dilation_kernel(
                                 g * (kernel_h * kernel_w * height_out * width_out) +
                                 k_idx * (height_out * width_out) +
                                 h_out * width_out + w_out;
-          const scalar_t weight_val = weight[weight_idx];
+          const acc_t weight_val = weight[weight_idx];
           
           // Skip if weight is zero
-          if (weight_val == static_cast<scalar_t>(0)) {
+          if (weight_val == static_cast<acc_t>(0)) {
             continue;
           }
           
           // Calculate offset relative to center
-          const scalar_t h_offset_factor = (kh - kernel_h_center) * dilation_h;
-          const scalar_t w_offset_factor = (kw - kernel_w_center) * dilation_w;
+          const acc_t h_offset_factor = (kh - kernel_h_center) * dilation_h;
+          const acc_t w_offset_factor = (kw - kernel_w_center) * dilation_w;
           
           // Calculate input position with current dilation
-          const scalar_t h_in = h_in_base + h_offset_factor * dilation_value + kernel_h_ref;
-          const scalar_t w_in = w_in_base + w_offset_factor * dilation_value + kernel_w_ref;
+          const acc_t h_in = h_in_base + h_offset_factor * dilation_value + kernel_h_ref;
+          const acc_t w_in = w_in_base + w_offset_factor * dilation_value + kernel_w_ref;
           
           // Skip if completely outside input
           if (h_in <= -1 || h_in >= height || w_in <= -1 || w_in >= width) {
@@ -517,14 +482,14 @@ __global__ void spatial_variable_convolution_backward_dilation_kernel(
           int h_high = h_low + 1;
           int w_high = w_low + 1;
           
-          scalar_t lh = h_in - h_low;
-          scalar_t lw = w_in - w_low;
+          acc_t lh = h_in - h_low;
+          acc_t lw = w_in - w_low;
           
           // Get input values with boundary checking
-          scalar_t v1 = static_cast<scalar_t>(0);
-          scalar_t v2 = static_cast<scalar_t>(0);
-          scalar_t v3 = static_cast<scalar_t>(0);
-          scalar_t v4 = static_cast<scalar_t>(0);
+          acc_t v1 = static_cast<acc_t>(0);
+          acc_t v2 = static_cast<acc_t>(0);
+          acc_t v3 = static_cast<acc_t>(0);
+          acc_t v4 = static_cast<acc_t>(0);
           
           bool valid_v1 = false;
           bool valid_v2 = false;
@@ -552,24 +517,24 @@ __global__ void spatial_variable_convolution_backward_dilation_kernel(
           }
           
           // Calculate gradients with respect to h and w
-          scalar_t grad_h = static_cast<scalar_t>(0);
-          scalar_t grad_w = static_cast<scalar_t>(0);
+          acc_t grad_h = static_cast<acc_t>(0);
+          acc_t grad_w = static_cast<acc_t>(0);
           
           if (valid_v1 || valid_v3) {
-            grad_h += (v3 - v1) * (static_cast<scalar_t>(1) - lw);
+            grad_h += (v3 - v1) * (static_cast<acc_t>(1) - lw);
           }
           if (valid_v2 || valid_v4) {
             grad_h += (v4 - v2) * lw;
           }
           if (valid_v1 || valid_v2) {
-            grad_w += (v2 - v1) * (static_cast<scalar_t>(1) - lh);
+            grad_w += (v2 - v1) * (static_cast<acc_t>(1) - lh);
           }
           if (valid_v3 || valid_v4) {
             grad_w += (v4 - v3) * lh;
           }
           
           // Scale by offset factors to get gradient w.r.t. dilation
-          const scalar_t grad_dilation_contribution = 
+          const acc_t grad_dilation_contribution =
               (grad_h * h_offset_factor + grad_w * w_offset_factor) * 
               weight_val * grad_out_val;
           
@@ -580,7 +545,7 @@ __global__ void spatial_variable_convolution_backward_dilation_kernel(
     }
     
     // Store gradient
-    grad_dilation_map[index] = grad_dilation;
+    grad_dilation_map[index] = static_cast<scalar_t>(grad_dilation);
   }
 }
 
@@ -635,7 +600,9 @@ std::vector<torch::Tensor> spatial_variable_convolution_cuda_backward(
   const int height = input.size(2);
   const int width = input.size(3);
   
-  auto grad_input = torch::zeros_like(input);
+  // Atomic updates must not round each contribution to FP16/BF16.
+  auto grad_input = torch::zeros_like(
+      input, input.options().dtype(at::toAccumulateType(input.scalar_type(), true)));
   auto grad_weight = torch::zeros_like(weight);
   auto grad_dilation_map = use_dilation_map ? torch::zeros_like(dilation_map) : torch::zeros({1, 1, 1}, dilation_map.options());
   
@@ -647,6 +614,7 @@ std::vector<torch::Tensor> spatial_variable_convolution_cuda_backward(
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, input.scalar_type(),
       "spatial_variable_convolution_backward_cuda", ([&] {
+        using acc_t = at::acc_type<scalar_t, true>;
         if (use_dilation_map) {
           // With dilation map
           spatial_variable_convolution_backward_input_kernel<scalar_t, true>
@@ -654,7 +622,7 @@ std::vector<torch::Tensor> spatial_variable_convolution_cuda_backward(
                   num_kernels_output, grad_output.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),
                   dilation_map.data_ptr<scalar_t>(), batch_size, channels, height, width,
                   height_out, width_out, kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
-                  dilation_h, dilation_w, groups, channels_per_group, grad_input.data_ptr<scalar_t>());
+                  dilation_h, dilation_w, groups, channels_per_group, grad_input.data_ptr<acc_t>());
           
           spatial_variable_convolution_backward_weight_kernel<scalar_t, true>
               <<<GET_BLOCKS(num_kernels_weight), CUDA_NUM_THREADS, 0, at::cuda::getCurrentCUDAStream()>>>(
@@ -677,7 +645,7 @@ std::vector<torch::Tensor> spatial_variable_convolution_cuda_backward(
                   num_kernels_output, grad_output.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),
                   nullptr, batch_size, channels, height, width,
                   height_out, width_out, kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
-                  dilation_h, dilation_w, groups, channels_per_group, grad_input.data_ptr<scalar_t>());
+                  dilation_h, dilation_w, groups, channels_per_group, grad_input.data_ptr<acc_t>());
           
           spatial_variable_convolution_backward_weight_kernel<scalar_t, false>
               <<<GET_BLOCKS(num_kernels_weight), CUDA_NUM_THREADS, 0, at::cuda::getCurrentCUDAStream()>>>(
@@ -688,5 +656,5 @@ std::vector<torch::Tensor> spatial_variable_convolution_cuda_backward(
         }
       }));
   
-  return {grad_input, grad_weight, grad_dilation_map};
+  return {grad_input.to(input.scalar_type()), grad_weight, grad_dilation_map};
 }
